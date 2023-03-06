@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-## Kraken2 DB build script.
+## Kraken2 genome and protein download script using Multiprocessing.
 This script takes an optional command-line argument for the number
 of CPUs for multiprocessing and for building the database.
 By default, 8 CPUs will be allocated.
-@author: sejalmodha
-Modified for Multiprocessing by -
-eladc@github
+
+Standard - archaea, bacteria, viral, human, UniVec_Core
 """
 #import modules
 import os
@@ -20,9 +19,16 @@ from Bio import SeqIO
 
 def download_file(url):
     ## download ~31654 files in parallel by the amount of allocated cpus,and in silent mode
-    subprocess.call(['wget', '-q', url])
+    subprocess.call(['wget', '-N', url])
 
 def main(cpus=None):
+    try:
+        libraries = ["archaea" , "bacteria" , "viral" , "human" , "UniVec_Core"]
+        for l in libraries:
+            os.makedirs(f'library/{l}')
+    except FileExistsError:
+        pass
+       
     ## get the current working directory
     if cpus == None:
         cpus = 8
@@ -30,16 +36,15 @@ def main(cpus=None):
     cwd = os.getcwd()
 
     ## function to process ftp url file that is created from assembly files
-    def process_url_file(inputurlfile):
+    def process_url_file(inputurlfile, file_suffix):
         url_file=open(inputurlfile,'r')
         pool = multiprocessing.Pool(processes=cpus)
-        file_suffix=r'genomic.gbff.gz'
         url_list = []
         for line in url_file:
             url=line.rstrip('\n').split(',')
             ftp_url= url[0]+'/'+url[1]+'_'+url[2]+'_'+file_suffix
             url_list.append(ftp_url)
-        ## Download the files in the gbff format
+        ## Download the files in the fna format
         print(len(url_list))
         pool.map(download_file, url_list)
         ## unzip the files
@@ -47,121 +52,102 @@ def main(cpus=None):
         pool.close()
         pool.join()
         return
+    
+    ## Download Assembly File and return a Pandas DataFrame:
+    def download_assembly_file(url, filename):
+        ## Download the file using wget system call
+        subprocess.call("wget "+url, shell=True)
+        ## Reformat the file to pandas-friendly format
+        subprocess.call(f"sed -i '1d' {filename}",shell=True)
+        subprocess.call(f"sed -i 's/^# //' {filename}", shell=True)
+        ## Read the file as a dataframe - using read_table
+        ## Use read_table if the column separator is tab
+        assembly_sum = pd.read_csv(filename, sep='\t', dtype='unicode')
+
+        return assembly_sum
+
 
     ## function to download bacterial sequences
     def download_bacterial_genomes(outfile='outfile.txt'):
-        assembly_summary_file=r'ftp://ftp.ncbi.nlm.nih.gov/genomes/refseq/bacteria/assembly_summary.txt'
-        if os.path.exists('assembly_summary.txt'):
-           os.remove('assembly_summary.txt')
+        assembly_file = 'assembly_summary.txt'
+        ncbi_url = f'ftp://ftp.ncbi.nlm.nih.gov/genomes/refseq/bacteria/{assembly_file}'
+        if os.path.exists(assembly_file):
+           os.remove(assembly_file)
         ## Download the file using wget sysyem call
-        subprocess.call("wget "+assembly_summary_file, shell=True)
-        ## Reformat the file to pandas-friendly format
-        subprocess.call("sed -i '1d' assembly_summary.txt",shell=True)
-        subprocess.call("sed -i 's/^# //' assembly_summary.txt", shell=True)
-        ## Read the file as a dataframe - using read_table
-        ## Use read_table if the column separator is tab
-        assembly_sum = pd.read_table('assembly_summary.txt',dtype='unicode')
+        assembly_df = download_assembly_file(ncbi_url, assembly_file)
+
         ## filter the dataframe and save the URLs of the complete genomes in a new file
-        my_df=assembly_sum[(assembly_sum['version_status'] == 'latest') &
-                    (assembly_sum['assembly_level']=='Complete Genome') 
+        my_df=assembly_df[(assembly_df['version_status'] == 'latest') &
+                    (assembly_df['assembly_level']=='Complete Genome') 
                     ]
         my_df=my_df[['ftp_path','assembly_accession','asm_name']]
         ## output_file.write
         my_df.to_csv(outfile,mode='w',index=False,header=None)
-        process_url_file(outfile)
+        print(my_df)
+        process_url_file(outfile, 'genomic.fna.gz')
+        process_url_file(outfile, 'protein.faa.gz')
         return
         
     ## function to download reference genomes 
     ## this function downloads latest version human reference genome by default 
-    def download_refseq_genome(taxid=9606,outfile='refseq_genome.txt'):
-        assembly_summary_file="ftp://ftp.ncbi.nih.gov/genomes/refseq/assembly_summary_refseq.txt"
-        if os.path.exists('assembly_summary_refseq.txt'):
-            os.remove('assembly_summary_refseq.txt')
-        ## Download the file using wget sysyem call
-        subprocess.call("wget "+assembly_summary_file, shell=True)
-        ## Reformat the file to pandas-friendly format
-        subprocess.call("sed -i '1d' assembly_summary_refseq.txt",shell=True)
-        subprocess.call("sed -i 's/^# //' assembly_summary_refseq.txt", shell=True)
-        ## Read the file as a dataframe - using read_table
-        ## Use read_table if the column separator is tab
-        assembly_sum = pd.read_csv('assembly_summary_refseq.txt', sep='\t', dtype='unicode')
-        my_df=assembly_sum[(assembly_sum['taxid'] == taxid) &
-                        ((assembly_sum['refseq_category'] == 'reference genome') |
-                            (assembly_sum['refseq_category'] == 'representative genome')
+    def download_refseq_genome(path, taxid=None,outfile='refseq_genome.txt'):
+        os.chdir(path)
+        assembly_file='assembly_summary.txt'
+        ncbi_url=f"https://ftp.ncbi.nih.gov/genomes/refseq/vertebrate_mammalian/Homo_sapiens/{assembly_file}"
+
+        if os.path.exists(assembly_file):
+            os.remove(assembly_file)
+        assembly_df = download_assembly_file(ncbi_url, assembly_file)
+
+        my_df=assembly_df[(assembly_df['taxid'] == taxid) &
+                        ((assembly_df['assembly_level'] == 'Complete Genome') 
                         )]
         my_df=my_df[['ftp_path','assembly_accession','asm_name']]
         ## Process the newly created file and download genomes from NCBI website
         my_df.to_csv(outfile,mode='w',index=False,header=None)
-        process_url_file(outfile)
+        print(my_df)
+        process_url_file(outfile, 'genomic.fna.gz')
+        process_url_file(outfile, 'protein.faa.gz')
         return
 
-    ## format genbank files to generate kraken-friendly formatted fasta files
-    def get_fasta_in_kraken_format(outfile_fasta='sequences.fa'):
-        output=open(outfile_fasta,'w')
-        for file_name in os.listdir(cwd):
-            if file_name.endswith('.gbff'):
-                records = SeqIO.parse(file_name, "genbank")
-                for seq_record in records:
-                    seq_id=seq_record.id
-                    seq=seq_record.seq
-                    for feature in seq_record.features:
-                        if 'source' in feature.type:
-                            print(feature.qualifiers)
-                            taxid=''.join(feature.qualifiers['db_xref'])
-                            taxid=re.sub(r'.*taxon:','kraken:taxid|',taxid)
-                            print(''.join(taxid))                        
-                            outseq=">"+seq_id+"|"+taxid+"\n"+str(seq)+"\n"
-                    output.write(outseq)
-                os.remove(file_name) 
-        output.close()  
-        return
-
+    ## Human
     print('Downloading human genome'+'\n')
     ## change argument in the following function if you want to download other reference genomes
     ## taxonomy ID 9606 (human) should be replaced with taxonomy ID of genome of interest
-    download_refseq_genome(9606,'human_genome_url.txt')
-    print('Converting sequences to kraken input format'+'\n')
-    get_fasta_in_kraken_format('human_genome.fa')
+    download_refseq_genome('library/human', '9606','human_genome_url.txt')
+    
+    ## viral
+    os.chdir('../../')
+    os.chdir('library/viral')
+    print('Downloading viral genomes and protein'+'\n')
+    subprocess.call('wget https://ftp.ncbi.nlm.nih.gov/refseq/release/viral/viral.1.1.genomic.fna.gz',shell=True)
+    subprocess.call('wget https://ftp.ncbi.nlm.nih.gov/refseq/release/viral/viral.1.protein.faa.gz',shell=True)
+    subprocess.call('gunzip *.gz',shell=True)
 
-    print('Downloading rat genome'+'\n')
-    download_refseq_genome(10116,'rat_genome_url.txt')
-    print('Converting sequences to kraken input format'+'\n')
-    get_fasta_in_kraken_format('rat_genome.fa')
+    ## UniVec_Core
+    os.chdir('../../')
+    os.chdir('library/UniVec_Core')
+    print('Downloading UniVec_Core'+'\n')
+    subprocess.call('wget https://ftp.ncbi.nlm.nih.gov/pub/UniVec/UniVec_Core', shell=True)
 
+    ## archaea
+    os.chdir('../../')
+    os.chdir('library/archaea')
+    print('Downloading archaeal genomes'+'\n')
+    for r in range(1, 4):
+        for k in range(1, 3):
+            subprocess.call(f'wget https://ftp.ncbi.nlm.nih.gov/refseq/release/archaea/archaea.{r}.{k}.genomic.fna.gz',shell=True)
+    for r in range(1, 6):
+        subprocess.call(f"wget https://ftp.ncbi.nlm.nih.gov/refseq/release/archaea/archaea.nonredundant_protein.{r}.protein.faa.gz", shell=True)
+    subprocess.call('gunzip *.gz',shell=True)
+
+    ## bacteria
+    os.chdir('../../')
+    os.chdir('library/bacteria')
     print('Downloading bacterial genomes'+'\n')
     download_bacterial_genomes('bacterial_complete_genome_url.txt')
-    print('Converting sequences to kraken input format'+'\n')
-    get_fasta_in_kraken_format('bacterial_genomes.fa')
 
-    print('Downloading viral genomes'+'\n')
-    subprocess.call('wget ftp://ftp.ncbi.nlm.nih.gov/refseq/release/viral/viral.*.genomic.gbff.gz',shell=True)
-    subprocess.call('gunzip *.gz',shell=True)
-    print('Converting sequences to kraken input format'+'\n')
-    get_fasta_in_kraken_format('viral_genomes.fa')
-
-    print('Downloading archaeal genomes'+'\n')
-    subprocess.call('wget ftp://ftp.ncbi.nlm.nih.gov/refseq/release/archaea/archaea.*.genomic.gbff.gz',shell=True)
-    subprocess.call('gunzip *.gz',shell=True)
-    print('Converting sequences to kraken input format'+'\n')
-    get_fasta_in_kraken_format('archaeal_genomes.fa')
-
-    print('Downloading plasmid sequences'+'\n')
-    subprocess.call('wget ftp://ftp.ncbi.nlm.nih.gov/refseq/release/plasmid/plasmid.*.genomic.gbff.gz', shell=True)
-    subprocess.call('gunzip *.gz',shell=True)
-    print('Converting sequences to kraken input format'+'\n')
-    get_fasta_in_kraken_format('plasmids_genomes.fa')
-
-    ## Set name for the krakendb directory
-    krakendb='HumanVirusBacteria'
-    subprocess.call('kraken2-build --download-taxonomy --db '+krakendb, shell=True)
-    print('Running Kraken DB build for '+krakendb+'\n')
-    print('This might take a while '+'\n')
-    for fasta_file in os.listdir(cwd):
-        if fasta_file.endswith('.fa') or fasta_file.endswith('.fasta'):
-            print (fasta_file)
-            subprocess.call('kraken2-build --add-to-library '+fasta_file +' --db '+krakendb,shell=True)
-    subprocess.call('kraken2-build --build --db '+krakendb+' --threads '+cpus ,shell=True)
-
+    os.chdir('../../')
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
