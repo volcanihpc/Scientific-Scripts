@@ -146,6 +146,7 @@ def main(cpus=None):
     os.chdir('library/bacteria')
     print('Downloading bacterial genomes'+'\n')
     download_bacterial_genomes('bacterial_complete_genome_url.txt')
+    subprocess.call('gunzip *.gz',shell=True)
 
     os.chdir('../../')
 
